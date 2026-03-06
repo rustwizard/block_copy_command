@@ -49,7 +49,6 @@ unsafe extern "C-unwind" fn block_copy_process_utility(
 }
 
 #[pg_guard]
-#[no_mangle]
 pub extern "C-unwind" fn _PG_init() {
     unsafe {
         PREV_PROCESS_UTILITY_HOOK = pg_sys::ProcessUtility_hook;
@@ -59,5 +58,40 @@ pub extern "C-unwind" fn _PG_init() {
 
 extension_sql_file!(".././sql/hooks.sql");
 
+#[cfg(feature = "pg_test")]
+extension_sql!(
+    "CREATE SCHEMA IF NOT EXISTS tests;",
+    name = "create_tests_schema",
+);
+
+/// Required by pgrx to configure the test PostgreSQL instance.
 #[cfg(test)]
-mod tests {}
+pub mod pg_test {
+    pub fn setup(_options: Vec<&str>) {}
+
+    pub fn postgresql_conf_options() -> Vec<&'static str> {
+        vec![]
+    }
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use pgrx::prelude::*;
+
+    #[pg_test]
+    fn test_create_and_drop_table_allowed() {
+        Spi::run("CREATE TEMP TABLE _test_bcc (id int)").unwrap();
+        Spi::run("DROP TABLE _test_bcc").unwrap();
+    }
+
+    #[pg_test]
+    fn test_select_allowed() {
+        let val = Spi::get_one::<i32>("SELECT 42").unwrap();
+        assert_eq!(val, Some(42));
+    }
+
+    // COPY blocking is tested via pg_regress (tests/pg_regress/sql/copy_blocked.sql)
+    // because SPI explicitly rejects COPY before ProcessUtility is ever called,
+    // making it untestable through Spi::run.
+}

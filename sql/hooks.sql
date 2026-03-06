@@ -1,0 +1,4 @@
+-- This extension registers a ProcessUtility hook in _PG_init to block COPY commands.
+-- No SQL-level objects are created.
+-- To activate for all connections, add to postgresql.conf:
+--   shared_preload_libraries = 'block_copy_command'

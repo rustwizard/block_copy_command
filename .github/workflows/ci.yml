@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, block-copy]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.17.0"
+
+jobs:
+  build:
+    name: Build & Test (pg${{ matrix.pg }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add PostgreSQL apt repository
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+
+      - name: Install PostgreSQL ${{ matrix.pg }} dev headers
+        run: sudo apt-get install -y postgresql-server-dev-${{ matrix.pg }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.pgrx
+          key: ${{ runner.os }}-pg${{ matrix.pg }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pg${{ matrix.pg }}-cargo-
+
+      - name: Install cargo-pgrx
+        run: |
+          if ! cargo pgrx --version 2>/dev/null | grep -q "$PGRX_VERSION"; then
+            cargo install cargo-pgrx --version "=$PGRX_VERSION" --locked
+          fi
+
+      - name: Initialize pgrx with system PostgreSQL ${{ matrix.pg }}
+        run: |
+          cargo pgrx init \
+            --pg${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Build
+        run: cargo build --no-default-features --features pg${{ matrix.pg }}
+
+      - name: Test
+        run: cargo pgrx test pg${{ matrix.pg }}

@@ -18,24 +18,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add PostgreSQL apt repository
+      - name: Install build dependencies
         run: |
-          sudo apt-get install -y curl ca-certificates
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            > /etc/apt/sources.list.d/pgdg.list'
           sudo apt-get update
-
-      - name: Install PostgreSQL 17
-        run: sudo apt-get install -y postgresql-17 postgresql-server-dev-17
+          sudo apt-get install -y build-essential libreadline-dev zlib1g-dev \
+            flex bison libxml2-dev libxslt-dev libssl-dev libicu-dev pkg-config
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and build artifacts
+      - name: Cache cargo registry and pgrx PostgreSQL build
         uses: actions/cache@v4
         with:
           path: |
@@ -43,9 +35,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.pgrx
-          key: ${{ runner.os }}-pg17-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-pg17-pgrx${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-pg17-cargo-
+            ${{ runner.os }}-pg17-pgrx${{ env.PGRX_VERSION }}-
 
       - name: Install cargo-pgrx
         run: |
@@ -53,8 +45,8 @@ jobs:
             cargo install cargo-pgrx --version "=$PGRX_VERSION" --locked
           fi
 
-      - name: Initialize pgrx with system PostgreSQL 17
-        run: cargo pgrx init --pg17 /usr/lib/postgresql/17/bin/pg_config
+      - name: Initialize pgrx (downloads and compiles PostgreSQL 17)
+        run: cargo pgrx init --pg17 download
 
       - name: Build
         run: cargo build --no-default-features --features pg17

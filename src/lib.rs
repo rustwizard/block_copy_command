@@ -1,3 +1,4 @@
+use pgrx::is_a;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
@@ -10,15 +11,15 @@ unsafe extern "C-unwind" fn block_copy_process_utility(
     pstmt: *mut pg_sys::PlannedStmt,
     query_string: *const std::os::raw::c_char,
     read_only_tree: bool,
-    context: pg_sys::ProcessUtilityContext,
-    params: *mut pg_sys::ParamListInfoData,
+    context: pg_sys::ProcessUtilityContext::Type,
+    params: pg_sys::ParamListInfo,
     query_env: *mut pg_sys::QueryEnvironment,
     dest: *mut pg_sys::DestReceiver,
     qc: *mut pg_sys::QueryCompletion,
 ) {
     unsafe {
         let node = (*pstmt).utilityStmt;
-        if !node.is_null() && pg_sys::is_a(node, pg_sys::NodeTag::T_CopyStmt) {
+        if !node.is_null() && is_a(node, pg_sys::NodeTag::T_CopyStmt) {
             pgrx::error!("COPY command is not allowed");
         }
 
@@ -56,7 +57,7 @@ pub extern "C-unwind" fn _PG_init() {
     }
 }
 
-extension_sql_file!("./sql/hooks.sql");
+extension_sql_file!(".././sql/hooks.sql");
 
 #[cfg(test)]
 mod tests {}

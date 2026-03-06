@@ -12,13 +12,8 @@ env:
 
 jobs:
   build:
-    name: Build & Test (pg${{ matrix.pg }})
+    name: Build & Test (pg17)
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        pg: [14, 15, 16, 17]
 
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +29,8 @@ jobs:
             > /etc/apt/sources.list.d/pgdg.list'
           sudo apt-get update
 
-      - name: Install PostgreSQL ${{ matrix.pg }} dev headers
-        run: sudo apt-get install -y postgresql-server-dev-${{ matrix.pg }}
+      - name: Install PostgreSQL 17
+        run: sudo apt-get install -y postgresql-17 postgresql-server-dev-17
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -48,9 +43,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.pgrx
-          key: ${{ runner.os }}-pg${{ matrix.pg }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-pg17-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-pg${{ matrix.pg }}-cargo-
+            ${{ runner.os }}-pg17-cargo-
 
       - name: Install cargo-pgrx
         run: |
@@ -58,13 +53,11 @@ jobs:
             cargo install cargo-pgrx --version "=$PGRX_VERSION" --locked
           fi
 
-      - name: Initialize pgrx with system PostgreSQL ${{ matrix.pg }}
-        run: |
-          cargo pgrx init \
-            --pg${{ matrix.pg }} /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      - name: Initialize pgrx with system PostgreSQL 17
+        run: cargo pgrx init --pg17 /usr/lib/postgresql/17/bin/pg_config
 
       - name: Build
-        run: cargo build --no-default-features --features pg${{ matrix.pg }}
+        run: cargo build --no-default-features --features pg17
 
       - name: Test
-        run: cargo pgrx test pg${{ matrix.pg }}
+        run: cargo pgrx test pg17

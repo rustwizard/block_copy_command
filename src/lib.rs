@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
+use std::ffi::CString;
 use pgrx::is_a;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
@@ -8,6 +9,8 @@ use pgrx::prelude::*;
 pg_module_magic!();
 
 static BLOCK_COPY_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
+// Comma-separated list of roles that are always blocked, including superusers.
+static BLOCKED_ROLES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 
@@ -25,10 +28,18 @@ struct ProcessUtilityArgs {
 unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
     let node = (*args.pstmt).utilityStmt;
     if !node.is_null() && is_a(node, pg_sys::NodeTag::T_CopyStmt) {
-        let is_superuser = pg_sys::superuser();
-        if BLOCK_COPY_ENABLED.get() && !is_superuser {
-            let user = get_current_username();
-            pgrx::log!("current_user = {:?}", user.unwrap_or("unknown".to_string()));
+        let username = get_current_username().unwrap_or_else(|| "unknown".to_string());
+        let in_blocked_list = BLOCKED_ROLES.get()
+            .and_then(|cstr| cstr.to_str().ok().map(|s| s.to_owned()))
+            .map(|list| list.split(',').map(str::trim).any(|r| r == username))
+            .unwrap_or(false);
+
+        // blocked_roles overrides superuser bypass; enabled applies to non-superusers
+        let should_block = in_blocked_list
+            || (BLOCK_COPY_ENABLED.get() && !pg_sys::superuser());
+
+        if should_block {
+            pgrx::log!("current_user = {:?}", username);
             pgrx::error!("COPY command is not allowed");
         }
     }
@@ -87,8 +98,17 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_bool_guc(
         c"block_copy_command.enabled",
         c"Block COPY commands for non-superusers",
-        c"When on (default), all COPY commands from non-superusers are blocked. Superusers are always allowed. Only superusers can change this setting.",
+        c"When on (default), all COPY commands from non-superusers are blocked. Superusers are always allowed unless listed in block_copy_command.blocked_roles.",
         &BLOCK_COPY_ENABLED,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"block_copy_command.blocked_roles",
+        c"Comma-separated list of roles always blocked from COPY",
+        c"Roles in this list are blocked from running COPY regardless of superuser status or the enabled setting.",
+        &BLOCKED_ROLES,
         GucContext::Suset,
         GucFlags::default(),
     );

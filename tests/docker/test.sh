@@ -7,38 +7,124 @@ FAIL=0
 pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-echo "=== Setting up extension ==="
+# psql as the superuser (postgres)
+SU="psql"
+# psql as a non-superuser
+RU="psql -U testuser"
+
+echo "=== Setting up ==="
 psql -c "CREATE EXTENSION IF NOT EXISTS block_copy_command;"
+psql -c "DROP OWNED BY testuser;" 2>/dev/null || true
+psql -c "DROP ROLE IF EXISTS testuser;"
+psql -c "CREATE ROLE testuser LOGIN PASSWORD 'testpass';"
+psql -c "GRANT CONNECT ON DATABASE testdb TO testuser;"
+export PGPASSWORD=postgres
 
 echo ""
-echo "=== Test 1: COPY TO STDOUT is blocked ==="
-out=$(psql -c "COPY pg_class TO STDOUT;" 2>&1 || true)
+echo "=== Block for non-superuser (GUC enabled, default) ==="
+
+echo ""
+echo "--- Test 1: non-superuser COPY TO STDOUT is blocked ---"
+out=$(PGPASSWORD=testpass $RU -c "COPY pg_class TO STDOUT;" 2>&1 || true)
 if echo "$out" | grep -q "COPY command is not allowed"; then
-    pass "COPY TO STDOUT blocked"
+    pass "non-superuser COPY TO STDOUT blocked"
 else
-    fail "COPY TO STDOUT not blocked; got: $out"
+    fail "non-superuser COPY TO STDOUT not blocked; got: $out"
 fi
 
 echo ""
-echo "=== Test 2: COPY FROM STDIN is blocked ==="
-out=$(psql -c "COPY pg_class FROM STDIN;" 2>&1 || true)
+echo "--- Test 2: non-superuser COPY FROM STDIN is blocked ---"
+out=$(PGPASSWORD=testpass $RU -c "COPY pg_class FROM STDIN;" 2>&1 || true)
 if echo "$out" | grep -q "COPY command is not allowed"; then
-    pass "COPY FROM STDIN blocked"
+    pass "non-superuser COPY FROM STDIN blocked"
 else
-    fail "COPY FROM STDIN not blocked; got: $out"
+    fail "non-superuser COPY FROM STDIN not blocked; got: $out"
 fi
 
 echo ""
-echo "=== Test 3: COPY (query) TO STDOUT is blocked ==="
-out=$(psql -c "COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
+echo "--- Test 3: non-superuser COPY (query) TO STDOUT is blocked ---"
+out=$(PGPASSWORD=testpass $RU -c "COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
 if echo "$out" | grep -q "COPY command is not allowed"; then
-    pass "COPY (query) TO STDOUT blocked"
+    pass "non-superuser COPY (query) TO STDOUT blocked"
 else
-    fail "COPY (query) TO STDOUT not blocked; got: $out"
+    fail "non-superuser COPY (query) TO STDOUT not blocked; got: $out"
 fi
 
 echo ""
-echo "=== Test 4: Regular SELECT works ==="
+echo "=== Superuser bypass ==="
+
+echo ""
+echo "--- Test 4: superuser COPY TO STDOUT is allowed ---"
+out=$($SU -c "COPY (SELECT 1) TO STDOUT;" 2>&1)
+if echo "$out" | grep -q "^1$"; then
+    pass "superuser COPY TO STDOUT allowed"
+else
+    fail "superuser COPY TO STDOUT not allowed; got: $out"
+fi
+
+echo ""
+echo "=== GUC block_copy_command.enabled ==="
+
+echo ""
+echo "--- Test 5: disable GUC -> non-superuser COPY is allowed ---"
+psql -c "ALTER ROLE testuser SET block_copy_command.enabled = off;"
+out=$(PGPASSWORD=testpass $RU -c "COPY (SELECT 1) TO STDOUT;" 2>&1)
+if echo "$out" | grep -q "^1$"; then
+    pass "non-superuser COPY allowed when GUC disabled"
+else
+    fail "non-superuser COPY not allowed when GUC disabled; got: $out"
+fi
+
+echo ""
+echo "--- Test 6: re-enable GUC -> non-superuser COPY is blocked again ---"
+psql -c "ALTER ROLE testuser RESET block_copy_command.enabled;"
+out=$(PGPASSWORD=testpass $RU -c "COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
+if echo "$out" | grep -q "COPY command is not allowed"; then
+    pass "non-superuser COPY blocked after GUC re-enabled"
+else
+    fail "non-superuser COPY not blocked after GUC re-enabled; got: $out"
+fi
+
+echo ""
+echo "=== GUC block_copy_command.blocked_roles ==="
+
+echo ""
+echo "--- Test 7: superuser in blocked_roles is blocked ---"
+psql -c "SET block_copy_command.blocked_roles = 'postgres'; COPY (SELECT 1) TO STDOUT;" > /dev/null 2>&1 || true
+out=$(psql -c "SET block_copy_command.blocked_roles = 'postgres'; COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
+if echo "$out" | grep -q "COPY command is not allowed"; then
+    pass "superuser blocked when listed in blocked_roles"
+else
+    fail "superuser not blocked when listed in blocked_roles; got: $out"
+fi
+
+echo ""
+echo "--- Test 8: superuser not in blocked_roles is still allowed ---"
+out=$(psql -c "SET block_copy_command.blocked_roles = 'someother'; COPY (SELECT 1) TO STDOUT;" 2>&1)
+if echo "$out" | grep -q "^1$"; then
+    pass "superuser allowed when not listed in blocked_roles"
+else
+    fail "superuser not allowed when not listed in blocked_roles; got: $out"
+fi
+
+echo ""
+echo "--- Test 9: non-superuser in blocked_roles is blocked even when enabled=off ---"
+psql -c "ALTER ROLE testuser SET block_copy_command.enabled = off;"
+psql -c "ALTER ROLE testuser SET block_copy_command.blocked_roles = 'testuser';"
+out=$(PGPASSWORD=testpass $RU -c "COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
+if echo "$out" | grep -q "COPY command is not allowed"; then
+    pass "non-superuser in blocked_roles is blocked even when enabled=off"
+else
+    fail "non-superuser in blocked_roles not blocked when enabled=off; got: $out"
+fi
+psql -c "ALTER ROLE testuser RESET block_copy_command.enabled;"
+psql -c "ALTER ROLE testuser RESET block_copy_command.blocked_roles;"
+
+echo ""
+echo "=== Regular SQL unaffected ==="
+
+echo ""
+echo "--- Test 10: SELECT works ---"
 result=$(psql -t -A -c "SELECT 42;")
 if [ "$result" = "42" ]; then
     pass "Regular SELECT works"
@@ -47,7 +133,7 @@ else
 fi
 
 echo ""
-echo "=== Test 5: DDL and DML still work ==="
+echo "--- Test 11: DDL and DML work ---"
 count=$(psql -t -A <<'SQL' | tail -1
 CREATE TEMP TABLE _docker_test (id int);
 INSERT INTO _docker_test VALUES (1), (2), (3);

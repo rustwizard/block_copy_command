@@ -1,5 +1,5 @@
 # Stage 1: Build the extension using pgrx
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 # Add the official PostgreSQL apt repository so postgresql-server-dev-17 is available
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,7 +28,7 @@ RUN cargo pgrx init --pg17 /usr/bin/pg_config && \
     cargo pgrx package --pg-config /usr/bin/pg_config --features pg17
 
 # Stage 2: PostgreSQL 17 with the extension installed
-FROM postgres:17-bookworm
+FROM postgres:17-trixie
 
 COPY --from=builder \
     /build/target/release/block_copy_command-pg17/usr/lib/postgresql/17/lib/block_copy_command.so \

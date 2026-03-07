@@ -13,7 +13,7 @@ services:
       retries: 10
 
   test:
-    image: postgres:17-bookworm
+    image: postgres:17-trixie
     depends_on:
       postgres:
         condition: service_healthy

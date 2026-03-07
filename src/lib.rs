@@ -1,10 +1,13 @@
 #![allow(clippy::too_many_arguments)]
 
+use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::is_a;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
 pg_module_magic!();
+
+static BLOCK_COPY_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 
@@ -22,7 +25,12 @@ struct ProcessUtilityArgs {
 unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
     let node = (*args.pstmt).utilityStmt;
     if !node.is_null() && is_a(node, pg_sys::NodeTag::T_CopyStmt) {
-        pgrx::error!("COPY command is not allowed");
+        let is_superuser = pg_sys::superuser();
+        if BLOCK_COPY_ENABLED.get() && !is_superuser {
+            let user = get_current_username();
+            pgrx::log!("current_user = {:?}", user.unwrap_or("unknown".to_string()));
+            pgrx::error!("COPY command is not allowed");
+        }
     }
 
     match PREV_PROCESS_UTILITY_HOOK {
@@ -76,19 +84,35 @@ unsafe extern "C-unwind" fn hook_trampoline(
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
+    GucRegistry::define_bool_guc(
+        c"block_copy_command.enabled",
+        c"Block COPY commands for non-superusers",
+        c"When on (default), all COPY commands from non-superusers are blocked. Superusers are always allowed. Only superusers can change this setting.",
+        &BLOCK_COPY_ENABLED,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     unsafe {
         PREV_PROCESS_UTILITY_HOOK = pg_sys::ProcessUtility_hook;
         pg_sys::ProcessUtility_hook = Some(hook_trampoline);
     }
 }
 
-extension_sql_file!(".././sql/hooks.sql");
+fn get_current_username() -> Option<String> {
+    unsafe {
+        let user_oid = pg_sys::GetUserId();
+        // noerr = true: returns NULL instead of raising an error if OID is not found
+        let name_ptr = pg_sys::GetUserNameFromId(user_oid, true);
+        if name_ptr.is_null() {
+            None
+        } else {
+            Some(std::ffi::CStr::from_ptr(name_ptr).to_string_lossy().into_owned())
+        }
+    }
+}
 
-#[cfg(feature = "pg_test")]
-extension_sql!(
-    "CREATE SCHEMA IF NOT EXISTS tests;",
-    name = "create_tests_schema",
-);
+extension_sql_file!(".././sql/hooks.sql");
 
 /// Required by pgrx to configure the test PostgreSQL instance.
 #[cfg(test)]

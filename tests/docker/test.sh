@@ -110,13 +110,15 @@ fi
 echo ""
 echo "--- Test 9: non-superuser in blocked_roles is blocked even when enabled=off ---"
 psql -c "ALTER ROLE testuser SET block_copy_command.enabled = off;"
-out=$(PGPASSWORD=testpass $RU -c "SET block_copy_command.blocked_roles = 'testuser'; COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
+psql -c "ALTER ROLE testuser SET block_copy_command.blocked_roles = 'testuser';"
+out=$(PGPASSWORD=testpass $RU -c "COPY (SELECT 1) TO STDOUT;" 2>&1 || true)
 if echo "$out" | grep -q "COPY command is not allowed"; then
     pass "non-superuser in blocked_roles is blocked even when enabled=off"
 else
     fail "non-superuser in blocked_roles not blocked when enabled=off; got: $out"
 fi
 psql -c "ALTER ROLE testuser RESET block_copy_command.enabled;"
+psql -c "ALTER ROLE testuser RESET block_copy_command.blocked_roles;"
 
 echo ""
 echo "=== Regular SQL unaffected ==="

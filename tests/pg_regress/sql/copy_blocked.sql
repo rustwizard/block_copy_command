@@ -1,4 +1,4 @@
--- Test that COPY TO is blocked by the hook
+-- Test that COPY TO and COPY FROM are blocked by the hook
 CREATE TEMP TABLE copy_test (id int);
 INSERT INTO copy_test VALUES (1), (2), (3);
 

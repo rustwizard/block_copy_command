@@ -7,12 +7,15 @@ A PostgreSQL extension that blocks `COPY` commands by installing a `ProcessUtili
 When loaded via `shared_preload_libraries`, the extension registers a hook into PostgreSQL's utility command processing pipeline. `COPY` statements are intercepted before execution according to the following priority:
 
 1. If the role is listed in `block_copy_command.blocked_roles` → **always blocked**, even superusers
-2. If `block_copy_command.enabled = off` → allowed (for roles not in the blocklist)
-3. If the user is a superuser → **allowed** (bypass)
-4. Otherwise → **blocked**
+2. If `block_copy_command.block_program = on` and the statement is `COPY TO/FROM PROGRAM` → **always blocked**, even superusers
+3. If `block_copy_command.enabled = off` → allowed (for roles not in the blocklist)
+4. If the user is a superuser → **allowed** (bypass)
+5. Otherwise, direction is checked: `block_copy_command.block_to` and `block_copy_command.block_from`
 
 ```
-ERROR:  COPY command is not allowed
+ERROR:  COPY TO command is not allowed
+ERROR:  COPY FROM command is not allowed
+ERROR:  COPY TO PROGRAM command is not allowed
 ```
 
 All other SQL commands (DDL, DML, queries) are unaffected and pass through to the standard handler.
@@ -66,21 +69,25 @@ COPY is blocked for non-superusers by default:
 ```sql
 -- as a regular user:
 COPY my_table TO STDOUT;
--- ERROR:  COPY command is not allowed
+-- ERROR:  COPY TO command is not allowed
 
 COPY my_table FROM STDIN;
--- ERROR:  COPY command is not allowed
+-- ERROR:  COPY FROM command is not allowed
 
 COPY (SELECT * FROM my_table) TO '/tmp/out.csv';
--- ERROR:  COPY command is not allowed
+-- ERROR:  COPY TO command is not allowed
 ```
 
-Superusers are bypassed unless explicitly listed in `block_copy_command.blocked_roles`:
+Superusers are bypassed unless explicitly listed in `block_copy_command.blocked_roles` or unless `block_copy_command.block_program = on`:
 
 ```sql
 -- as a superuser (not in blocked_roles):
 COPY (SELECT 1) TO STDOUT;
 -- 1
+
+-- COPY TO PROGRAM is blocked for everyone by default:
+COPY (SELECT 1) TO PROGRAM 'cat';
+-- ERROR:  COPY TO PROGRAM command is not allowed
 ```
 
 ### GUC: `block_copy_command.enabled`
@@ -89,7 +96,7 @@ Toggles the block for non-superusers at runtime. Only superusers can change this
 
 | Value | Effect |
 |-------|--------|
-| `on` (default) | COPY blocked for non-superusers |
+| `on` (default) | COPY blocked for non-superusers (subject to `block_to`/`block_from`) |
 | `off` | COPY allowed (roles not in `blocked_roles`) |
 
 **Per-role** (takes effect on next connection):
@@ -113,6 +120,47 @@ ALTER DATABASE mydb SET block_copy_command.enabled = off;
 SET block_copy_command.enabled = off;
 COPY ...;
 SET block_copy_command.enabled = on;
+```
+
+### GUC: `block_copy_command.block_to`
+
+Controls whether `COPY TO` (export) is blocked for non-superusers. Only evaluated when `enabled = on`. Only superusers can change this setting.
+
+| Value | Effect |
+|-------|--------|
+| `on` (default) | `COPY TO` blocked for non-superusers |
+| `off` | `COPY TO` allowed for non-superusers |
+
+**Typical ETL pattern** — allow import, block export:
+
+```sql
+-- Allow COPY FROM (import) for etl_user, keep COPY TO blocked
+ALTER ROLE etl_user SET block_copy_command.block_from = off;
+```
+
+### GUC: `block_copy_command.block_from`
+
+Controls whether `COPY FROM` (import) is blocked for non-superusers. Only evaluated when `enabled = on`. Only superusers can change this setting.
+
+| Value | Effect |
+|-------|--------|
+| `on` (default) | `COPY FROM` blocked for non-superusers |
+| `off` | `COPY FROM` allowed for non-superusers |
+
+### GUC: `block_copy_command.block_program`
+
+Blocks `COPY TO PROGRAM` and `COPY FROM PROGRAM` for **all users**, including superusers. This prevents shell command execution via COPY. Only superusers can change this setting.
+
+| Value | Effect |
+|-------|--------|
+| `on` (default) | `COPY ... PROGRAM` blocked for everyone |
+| `off` | `COPY ... PROGRAM` allowed (subject to other rules) |
+
+```sql
+-- Temporarily allow COPY TO PROGRAM for a superuser session:
+SET block_copy_command.block_program = off;
+COPY (SELECT 1) TO PROGRAM 'cat';
+SET block_copy_command.block_program = on;
 ```
 
 ### GUC: `block_copy_command.blocked_roles`
@@ -143,7 +191,7 @@ When a COPY command is blocked, the current username is written to the PostgreSQ
 
 ```
 LOG:  current_user = "someuser"
-ERROR:  COPY command is not allowed
+ERROR:  COPY TO command is not allowed
 ```
 
 ## Testing
@@ -156,7 +204,11 @@ docker compose up --build --abort-on-container-exit --exit-code-from test
 
 This builds the extension inside Docker, starts a PostgreSQL 17 instance with the extension loaded, and runs the integration test suite covering:
 
-- COPY blocked for non-superusers (default)
+- COPY TO and COPY FROM blocked for non-superusers (default)
+- Direction-specific errors (`COPY TO command is not allowed` / `COPY FROM command is not allowed`)
+- `block_from=off`: allows COPY FROM while keeping COPY TO blocked
+- `block_to=off`: allows COPY TO while keeping COPY FROM blocked
+- `block_program=on`: COPY TO/FROM PROGRAM blocked even for superusers
 - Superuser bypass
 - GUC `block_copy_command.enabled` toggle
 - GUC `block_copy_command.blocked_roles` blocks specific roles including superusers

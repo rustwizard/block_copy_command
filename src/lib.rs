@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(show("block_copy_command.blocked_roles"), "");
     }
 
-    //  GUC round-trips (SET → SHOW → restore)
+    // GUC round-trips (SET → SHOW → restore)
     // These run as the pgrx test superuser, so Suset GUCs are writable.
 
     #[pg_test]

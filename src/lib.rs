@@ -11,6 +11,11 @@ pg_module_magic!();
 static BLOCK_COPY_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 // Comma-separated list of roles that are always blocked, including superusers.
 static BLOCKED_ROLES: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+// Direction-specific blocking (apply only when enabled=on and user is not a superuser).
+static BLOCK_TO: GucSetting<bool> = GucSetting::<bool>::new(true);
+static BLOCK_FROM: GucSetting<bool> = GucSetting::<bool>::new(true);
+// Block COPY TO/FROM PROGRAM for all users, including superusers.
+static BLOCK_PROGRAM: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 
@@ -28,19 +33,34 @@ struct ProcessUtilityArgs {
 unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
     let node = (*args.pstmt).utilityStmt;
     if !node.is_null() && is_a(node, pg_sys::NodeTag::T_CopyStmt) {
+        let copy_stmt = node as *mut pg_sys::CopyStmt;
+        let is_from = (*copy_stmt).is_from;
+        let is_program = (*copy_stmt).is_program;
+
         let username = get_current_username().unwrap_or_else(|| "unknown".to_string());
         let in_blocked_list = BLOCKED_ROLES.get()
             .and_then(|cstr| cstr.to_str().ok().map(|s| s.to_owned()))
             .map(|list| list.split(',').map(str::trim).any(|r| r == username))
             .unwrap_or(false);
 
-        // blocked_roles overrides superuser bypass; enabled applies to non-superusers
+        // COPY TO/FROM PROGRAM is blocked for everyone (including superusers) when block_program=on.
+        let program_blocked = is_program && BLOCK_PROGRAM.get();
+
+        // Direction-based blocking applies to non-superusers when enabled=on.
+        let direction_blocked = if is_from {
+            BLOCK_FROM.get()
+        } else {
+            BLOCK_TO.get()
+        };
         let should_block = in_blocked_list
-            || (BLOCK_COPY_ENABLED.get() && !pg_sys::superuser());
+            || program_blocked
+            || (BLOCK_COPY_ENABLED.get() && !pg_sys::superuser() && direction_blocked);
 
         if should_block {
             pgrx::log!("current_user = {:?}", username);
-            pgrx::error!("COPY command is not allowed");
+            let direction = if is_from { "FROM" } else { "TO" };
+            let suffix = if is_program { " PROGRAM" } else { "" };
+            pgrx::error!("COPY {}{} command is not allowed", direction, suffix);
         }
     }
 
@@ -109,6 +129,33 @@ pub extern "C-unwind" fn _PG_init() {
         c"Comma-separated list of roles always blocked from COPY",
         c"Roles in this list are blocked from running COPY regardless of superuser status or the enabled setting.",
         &BLOCKED_ROLES,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"block_copy_command.block_to",
+        c"Block COPY TO commands for non-superusers",
+        c"When on (default), COPY TO (export) is blocked for non-superusers. Set to off to allow COPY TO while keeping COPY FROM blocked.",
+        &BLOCK_TO,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"block_copy_command.block_from",
+        c"Block COPY FROM commands for non-superusers",
+        c"When on (default), COPY FROM (import) is blocked for non-superusers. Set to off to allow COPY FROM while keeping COPY TO blocked.",
+        &BLOCK_FROM,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"block_copy_command.block_program",
+        c"Block COPY TO/FROM PROGRAM for all users including superusers",
+        c"When on (default), COPY TO/FROM PROGRAM is blocked for all users including superusers. This prevents shell command execution via COPY.",
+        &BLOCK_PROGRAM,
         GucContext::Suset,
         GucFlags::default(),
     );

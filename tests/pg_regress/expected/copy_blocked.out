@@ -1,17 +1,17 @@
--- Test that COPY TO is blocked by the hook
+-- Test that COPY TO and COPY FROM are blocked by the hook
 CREATE TEMP TABLE copy_test (id int);
 INSERT INTO copy_test VALUES (1), (2), (3);
 
 \set ON_ERROR_STOP off
 
 COPY copy_test TO STDOUT;
-ERROR:  COPY command is not allowed
+ERROR:  COPY TO command is not allowed
 
 COPY copy_test FROM STDIN;
-ERROR:  COPY command is not allowed
+ERROR:  COPY FROM command is not allowed
 
 COPY pg_class TO STDOUT;
-ERROR:  COPY command is not allowed
+ERROR:  COPY TO command is not allowed
 
 \set ON_ERROR_STOP on
 

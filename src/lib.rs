@@ -1,10 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
-use std::ffi::CString;
 use pgrx::is_a;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
+use std::ffi::CString;
 
 pg_module_magic!();
 
@@ -38,7 +38,8 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
         let is_program = (*copy_stmt).is_program;
 
         let username = get_current_username().unwrap_or_else(|| "unknown".to_string());
-        let in_blocked_list = BLOCKED_ROLES.get()
+        let in_blocked_list = BLOCKED_ROLES
+            .get()
             .and_then(|cstr| cstr.to_str().ok().map(|s| s.to_owned()))
             .map(|list| list.split(',').map(str::trim).any(|r| r == username))
             .unwrap_or(false);
@@ -174,7 +175,11 @@ fn get_current_username() -> Option<String> {
         if name_ptr.is_null() {
             None
         } else {
-            Some(std::ffi::CStr::from_ptr(name_ptr).to_string_lossy().into_owned())
+            Some(
+                std::ffi::CStr::from_ptr(name_ptr)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
         }
     }
 }
@@ -196,6 +201,15 @@ pub mod pg_test {
 mod tests {
     use pgrx::prelude::*;
 
+    // helpers
+    fn show(guc: &str) -> String {
+        Spi::get_one::<String>(&format!("SHOW {guc}"))
+            .unwrap()
+            .unwrap_or_default()
+    }
+
+    // DDL / DML / SELECT pass-through
+
     #[pg_test]
     fn test_create_and_drop_table_allowed() {
         Spi::run("CREATE TEMP TABLE _test_bcc (id int)").unwrap();
@@ -208,7 +222,94 @@ mod tests {
         assert_eq!(val, Some(42));
     }
 
-    // COPY blocking is tested via pg_regress (tests/pg_regress/sql/copy_blocked.sql)
+    #[pg_test]
+    fn test_insert_update_delete_allowed() {
+        Spi::run("CREATE TEMP TABLE _test_dml (id int, v text)").unwrap();
+        Spi::run("INSERT INTO _test_dml VALUES (1, 'a'), (2, 'b')").unwrap();
+        Spi::run("UPDATE _test_dml SET v = 'x' WHERE id = 1").unwrap();
+        Spi::run("DELETE FROM _test_dml WHERE id = 2").unwrap();
+        let count = Spi::get_one::<i64>("SELECT count(*) FROM _test_dml")
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1);
+        Spi::run("DROP TABLE _test_dml").unwrap();
+    }
+
+    // GUC defaults
+    #[pg_test]
+    fn test_guc_enabled_default_on() {
+        assert_eq!(show("block_copy_command.enabled"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_block_to_default_on() {
+        assert_eq!(show("block_copy_command.block_to"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_block_from_default_on() {
+        assert_eq!(show("block_copy_command.block_from"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_block_program_default_on() {
+        assert_eq!(show("block_copy_command.block_program"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_blocked_roles_default_empty() {
+        assert_eq!(show("block_copy_command.blocked_roles"), "");
+    }
+
+    // GUC round-trips (SET → SHOW → restore)
+    // These run as the pgrx test superuser, so Suset GUCs are writable.
+
+    #[pg_test]
+    fn test_guc_block_to_roundtrip() {
+        Spi::run("SET block_copy_command.block_to = off").unwrap();
+        assert_eq!(show("block_copy_command.block_to"), "off");
+        Spi::run("SET block_copy_command.block_to = on").unwrap();
+        assert_eq!(show("block_copy_command.block_to"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_block_from_roundtrip() {
+        Spi::run("SET block_copy_command.block_from = off").unwrap();
+        assert_eq!(show("block_copy_command.block_from"), "off");
+        Spi::run("SET block_copy_command.block_from = on").unwrap();
+        assert_eq!(show("block_copy_command.block_from"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_block_program_roundtrip() {
+        Spi::run("SET block_copy_command.block_program = off").unwrap();
+        assert_eq!(show("block_copy_command.block_program"), "off");
+        Spi::run("SET block_copy_command.block_program = on").unwrap();
+        assert_eq!(show("block_copy_command.block_program"), "on");
+    }
+
+    #[pg_test]
+    fn test_guc_blocked_roles_roundtrip() {
+        Spi::run("SET block_copy_command.blocked_roles = 'alice, bob'").unwrap();
+        assert_eq!(show("block_copy_command.blocked_roles"), "alice, bob");
+        Spi::run("RESET block_copy_command.blocked_roles").unwrap();
+        assert_eq!(show("block_copy_command.blocked_roles"), "");
+    }
+
+    // GUC independence: changing one direction does not affect the other
+
+    #[pg_test]
+    fn test_block_to_and_block_from_are_independent() {
+        Spi::run("SET block_copy_command.block_to = off").unwrap();
+        assert_eq!(show("block_copy_command.block_from"), "on");
+        Spi::run("SET block_copy_command.block_to = on").unwrap();
+
+        Spi::run("SET block_copy_command.block_from = off").unwrap();
+        assert_eq!(show("block_copy_command.block_to"), "on");
+        Spi::run("SET block_copy_command.block_from = on").unwrap();
+    }
+
+    // COPY blocking itself is tested via pg_regress (tests/pg_regress/sql/copy_blocked.sql)
     // because SPI explicitly rejects COPY before ProcessUtility is ever called,
     // making it untestable through Spi::run.
 }

@@ -14,6 +14,7 @@ When loaded via `shared_preload_libraries`, the extension registers a hook into 
 
 ```
 ERROR:  COPY TO command is not allowed
+HINT:   Contact DBA to request access
 ERROR:  COPY FROM command is not allowed
 ERROR:  COPY TO PROGRAM command is not allowed
 ```
@@ -163,6 +164,35 @@ COPY (SELECT 1) TO PROGRAM 'cat';
 SET block_copy_command.block_program = on;
 ```
 
+### GUC: `block_copy_command.hint`
+
+An optional custom hint appended to the error when a `COPY` command is blocked. Only superusers can change this setting.
+
+| Value | Effect |
+|-------|--------|
+| *(empty, default)* | No hint shown |
+| any string | Shown as `HINT:` after the error message |
+
+```sql
+SET block_copy_command.hint = 'Contact DBA to request access';
+
+-- regular user now sees:
+-- ERROR:  COPY TO command is not allowed
+-- HINT:   Contact DBA to request access
+```
+
+**Cluster-wide** (in `postgresql.conf`):
+
+```
+block_copy_command.hint = 'Contact DBA to request access'
+```
+
+**Per-database:**
+
+```sql
+ALTER DATABASE mydb SET block_copy_command.hint = 'Contact DBA to request access';
+```
+
 ### GUC: `block_copy_command.blocked_roles`
 
 A comma-separated list of role names that are **always** blocked from running `COPY`, regardless of superuser status or the `enabled` setting. Only superusers can change this setting.
@@ -192,6 +222,7 @@ When a COPY command is blocked, the current username is written to the PostgreSQ
 ```
 LOG:  current_user = "someuser"
 ERROR:  COPY TO command is not allowed
+HINT:   Contact DBA to request access
 ```
 
 ## Testing

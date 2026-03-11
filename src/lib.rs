@@ -3,6 +3,7 @@
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::is_a;
 use pgrx::pg_sys;
+use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use std::ffi::CString;
 
@@ -16,6 +17,8 @@ static BLOCK_TO: GucSetting<bool> = GucSetting::<bool>::new(true);
 static BLOCK_FROM: GucSetting<bool> = GucSetting::<bool>::new(true);
 // Block COPY TO/FROM PROGRAM for all users, including superusers.
 static BLOCK_PROGRAM: GucSetting<bool> = GucSetting::<bool>::new(true);
+// Optional hint message shown to users when their COPY command is blocked.
+static HINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 
@@ -61,7 +64,19 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
             pgrx::log!("current_user = {:?}", username);
             let direction = if is_from { "FROM" } else { "TO" };
             let suffix = if is_program { " PROGRAM" } else { "" };
-            pgrx::error!("COPY {}{} command is not allowed", direction, suffix);
+            let msg = format!("COPY {}{} command is not allowed", direction, suffix);
+            let hint = HINT
+                .get()
+                .and_then(|cstr| cstr.to_str().ok().map(str::to_owned));
+            let mut report = ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                msg,
+                "",
+            );
+            if let Some(h) = hint {
+                report = report.set_hint(h);
+            }
+            report.report(PgLogLevel::ERROR);
         }
     }
 
@@ -157,6 +172,15 @@ pub extern "C-unwind" fn _PG_init() {
         c"Block COPY TO/FROM PROGRAM for all users including superusers",
         c"When on (default), COPY TO/FROM PROGRAM is blocked for all users including superusers. This prevents shell command execution via COPY.",
         &BLOCK_PROGRAM,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"block_copy_command.hint",
+        c"Custom hint shown when a COPY command is blocked",
+        c"When set, this message is appended as a HINT to the error raised when a COPY command is blocked (e.g. 'Contact DBA to request access').",
+        &HINT,
         GucContext::Suset,
         GucFlags::default(),
     );

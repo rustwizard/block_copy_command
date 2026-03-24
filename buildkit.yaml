@@ -21,7 +21,6 @@ pgVersions:
   - "14"
   - "15"
   - "16"
-  - "17"
 buildDependencies:
   - curl
   - build-essential

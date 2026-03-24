@@ -1,7 +1,14 @@
 [package]
 name = "block_copy_command"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
+description = "PostgreSQL extension that blocks COPY commands via a configurable ProcessUtility hook"
+authors = ["RustWizard"]
+repository = "https://github.com/rustwizard/block_copy_command"
+homepage = "https://github.com/rustwizard/block_copy_command"
+license = "BSD-3-Clause"
+keywords = ["postgresql", "pgrx", "security", "copy", "hook"]
+categories = ["database"]
 
 [lib]
 crate-type = ["cdylib", "lib"]

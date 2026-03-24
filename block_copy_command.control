@@ -1,4 +1,4 @@
-comment = 'block_copy_command:  Created by pgrx'
+comment = 'Block COPY commands via a configurable ProcessUtility hook'
 default_version = '@CARGO_VERSION@'
 module_pathname = 'block_copy_command'
 relocatable = false

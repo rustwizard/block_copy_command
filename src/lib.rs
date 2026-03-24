@@ -25,6 +25,7 @@ static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 struct ProcessUtilityArgs {
     pstmt: *mut pg_sys::PlannedStmt,
     query_string: *const std::os::raw::c_char,
+    #[cfg(not(feature = "pg13"))]
     read_only_tree: bool,
     context: pg_sys::ProcessUtilityContext::Type,
     params: pg_sys::ParamListInfo,
@@ -80,6 +81,29 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
         }
     }
 
+    #[cfg(feature = "pg13")]
+    match PREV_PROCESS_UTILITY_HOOK {
+        Some(prev) => prev(
+            args.pstmt,
+            args.query_string,
+            args.context,
+            args.params,
+            args.query_env,
+            args.dest,
+            args.qc,
+        ),
+        None => pg_sys::standard_ProcessUtility(
+            args.pstmt,
+            args.query_string,
+            args.context,
+            args.params,
+            args.query_env,
+            args.dest,
+            args.qc,
+        ),
+    }
+
+    #[cfg(not(feature = "pg13"))]
     match PREV_PROCESS_UTILITY_HOOK {
         Some(prev) => prev(
             args.pstmt,
@@ -105,6 +129,31 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
 }
 
 #[pg_guard]
+#[cfg(feature = "pg13")]
+unsafe extern "C-unwind" fn hook_trampoline(
+    pstmt: *mut pg_sys::PlannedStmt,
+    query_string: *const std::os::raw::c_char,
+    context: pg_sys::ProcessUtilityContext::Type,
+    params: pg_sys::ParamListInfo,
+    query_env: *mut pg_sys::QueryEnvironment,
+    dest: *mut pg_sys::DestReceiver,
+    qc: *mut pg_sys::QueryCompletion,
+) {
+    unsafe {
+        block_copy_process_utility(ProcessUtilityArgs {
+            pstmt,
+            query_string,
+            context,
+            params,
+            query_env,
+            dest,
+            qc,
+        });
+    }
+}
+
+#[pg_guard]
+#[cfg(not(feature = "pg13"))]
 unsafe extern "C-unwind" fn hook_trampoline(
     pstmt: *mut pg_sys::PlannedStmt,
     query_string: *const std::os::raw::c_char,

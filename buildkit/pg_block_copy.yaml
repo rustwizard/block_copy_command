@@ -1,9 +1,9 @@
 apiVersion: v1
 name: block_copy_command
-version: "0.1.1"
+version: "0.1.2"
 homepage: https://github.com/rustwizard/block_copy_command
 repository: https://github.com/rustwizard/block_copy_command
-source: https://github.com/rustwizard/block_copy_command/archive/refs/tags/v0.1.1.tar.gz
+source: https://github.com/rustwizard/block_copy_command/archive/refs/tags/v0.1.2.tar.gz
 description: PostgreSQL extension that blocks COPY commands via a configurable ProcessUtility hook
 license: BSD-3-Clause
 keywords:

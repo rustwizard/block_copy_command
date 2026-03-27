@@ -3,6 +3,7 @@
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::is_a;
 use pgrx::pg_sys;
+use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use std::ffi::CString;
@@ -19,6 +20,10 @@ static BLOCK_FROM: GucSetting<bool> = GucSetting::<bool>::new(true);
 static BLOCK_PROGRAM: GucSetting<bool> = GucSetting::<bool>::new(true);
 // Optional hint message shown to users when their COPY command is blocked.
 static HINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+// Write every intercepted COPY to block_copy_command.audit_log via SPI.
+// NOTE: blocked events are written before ERROR is raised and will be rolled back
+// when the transaction aborts.  The server LOG line is authoritative for blocked events.
+static AUDIT_LOG_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 
@@ -41,11 +46,17 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
         let is_from = (*copy_stmt).is_from;
         let is_program = (*copy_stmt).is_program;
 
-        let username = get_current_username().unwrap_or_else(|| "unknown".to_string());
+        let current_user = get_current_username().unwrap_or_else(|| "unknown".to_string());
+        let session_user = get_session_username().unwrap_or_else(|| "unknown".to_string());
+
+        let query_text = std::ffi::CStr::from_ptr(args.query_string)
+            .to_str()
+            .unwrap_or("<non-utf8 query>");
+
         let in_blocked_list = BLOCKED_ROLES
             .get()
             .and_then(|cstr| cstr.to_str().ok().map(|s| s.to_owned()))
-            .map(|list| list.split(',').map(str::trim).any(|r| r == username))
+            .map(|list| list.split(',').map(str::trim).any(|r| r == current_user))
             .unwrap_or(false);
 
         // COPY TO/FROM PROGRAM is blocked for everyone (including superusers) when block_program=on.
@@ -57,15 +68,44 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
         } else {
             BLOCK_TO.get()
         };
-        let should_block = in_blocked_list
-            || program_blocked
-            || (BLOCK_COPY_ENABLED.get() && !pg_sys::superuser() && direction_blocked);
+
+        // Derive the reason first; should_block follows from it.
+        let block_reason: Option<&str> = if in_blocked_list {
+            Some("role_listed")
+        } else if program_blocked {
+            Some("program_blocked")
+        } else if BLOCK_COPY_ENABLED.get() && !pg_sys::superuser() && direction_blocked {
+            Some("direction_blocked")
+        } else {
+            None
+        };
+        let should_block = block_reason.is_some();
+        let copy_direction = if is_from { "FROM" } else { "TO" };
+
+        // Write to audit_log before raising the error so the record exists at
+        // the SPI level.  For blocked commands it will be rolled back when ERROR
+        // aborts the transaction; the LOG line below is the reliable record in
+        // that case.
+        write_audit_log(
+            &session_user,
+            &current_user,
+            query_text,
+            copy_direction,
+            is_program,
+            should_block,
+            block_reason,
+        );
 
         if should_block {
-            pgrx::log!("current_user = {:?}", username);
-            let direction = if is_from { "FROM" } else { "TO" };
+            pgrx::log!(
+                "blocked COPY {} program={} user={:?} reason={:?}",
+                copy_direction,
+                is_program,
+                current_user,
+                block_reason.unwrap_or(""),
+            );
             let suffix = if is_program { " PROGRAM" } else { "" };
-            let msg = format!("COPY {}{} command is not allowed", direction, suffix);
+            let msg = format!("COPY {}{} command is not allowed", copy_direction, suffix);
             let hint = HINT
                 .get()
                 .and_then(|cstr| cstr.to_str().ok().map(str::to_owned));
@@ -126,6 +166,57 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
             args.qc,
         ),
     }
+}
+
+// Write one row to block_copy_command.audit_log.  All errors are silently
+// swallowed so a missing table (library loaded before CREATE EXTENSION) or any
+// other SPI problem never breaks the main blocking logic.
+fn write_audit_log(
+    session_user: &str,
+    current_user: &str,
+    query_text: &str,
+    copy_direction: &str,
+    copy_is_program: bool,
+    blocked: bool,
+    block_reason: Option<&str>,
+) {
+    if !AUDIT_LOG_ENABLED.get() {
+        return;
+    }
+
+    // Catch any PostgreSQL error (e.g. relation does not exist) so we never
+    // propagate audit failures to the caller.  The closure captures only
+    // UnwindSafe types (&str, bool, Option<&str>) so PgTryBuilder is happy.
+    PgTryBuilder::new(move || {
+        Spi::connect_mut(|client| {
+            // DatumWithOid::from uses T::type_oid() automatically; Option<&str>
+            // produces a NULL datum when None.
+            let args = [
+                DatumWithOid::from(session_user),
+                DatumWithOid::from(current_user),
+                DatumWithOid::from(query_text),
+                DatumWithOid::from(copy_direction),
+                DatumWithOid::from(copy_is_program),
+                DatumWithOid::from(blocked),
+                DatumWithOid::from(block_reason),
+            ];
+            // client_addr and application_name are read via SQL functions so we
+            // don't need unsafe access to MyProcPort.
+            let _ = client.update(
+                "INSERT INTO block_copy_command.audit_log \
+                 (session_user_name, current_user_name, query_text, copy_direction, \
+                  copy_is_program, client_addr, application_name, blocked, block_reason) \
+                 VALUES ($1, $2, $3, $4, $5, \
+                         inet_client_addr(), \
+                         current_setting('application_name', true), \
+                         $6, $7)",
+                None,
+                &args,
+            );
+        });
+    })
+    .catch_others(|_| ())
+    .execute();
 }
 
 #[pg_guard]
@@ -234,6 +325,18 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_bool_guc(
+        c"block_copy_command.audit_log_enabled",
+        c"Write intercepted COPY events to block_copy_command.audit_log",
+        c"When on (default), every intercepted COPY command is recorded in \
+          block_copy_command.audit_log via SPI. Blocked events are best-effort: the \
+          INSERT is rolled back when ERROR aborts the transaction, so the server log \
+          is authoritative for blocked events. Set to off to disable table writes.",
+        &AUDIT_LOG_ENABLED,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     unsafe {
         PREV_PROCESS_UTILITY_HOOK = pg_sys::ProcessUtility_hook;
         pg_sys::ProcessUtility_hook = Some(hook_trampoline);
@@ -244,6 +347,25 @@ fn get_current_username() -> Option<String> {
     unsafe {
         let user_oid = pg_sys::GetUserId();
         // noerr = true: returns NULL instead of raising an error if OID is not found
+        let name_ptr = pg_sys::GetUserNameFromId(user_oid, true);
+        if name_ptr.is_null() {
+            None
+        } else {
+            Some(
+                std::ffi::CStr::from_ptr(name_ptr)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+    }
+}
+
+// Like get_current_username but returns the session-level user (the role that
+// actually authenticated).  This differs from current_user when SET ROLE has
+// been used in the session.
+fn get_session_username() -> Option<String> {
+    unsafe {
+        let user_oid = pg_sys::GetSessionUserId();
         let name_ptr = pg_sys::GetUserNameFromId(user_oid, true);
         if name_ptr.is_null() {
             None
@@ -334,6 +456,11 @@ mod tests {
         assert_eq!(show("block_copy_command.blocked_roles"), "");
     }
 
+    #[pg_test]
+    fn test_guc_audit_log_enabled_default_on() {
+        assert_eq!(show("block_copy_command.audit_log_enabled"), "on");
+    }
+
     // GUC round-trips (SET → SHOW → restore)
     // These run as the pgrx test superuser, so Suset GUCs are writable.
 
@@ -369,6 +496,14 @@ mod tests {
         assert_eq!(show("block_copy_command.blocked_roles"), "");
     }
 
+    #[pg_test]
+    fn test_guc_audit_log_enabled_roundtrip() {
+        Spi::run("SET block_copy_command.audit_log_enabled = off").unwrap();
+        assert_eq!(show("block_copy_command.audit_log_enabled"), "off");
+        Spi::run("SET block_copy_command.audit_log_enabled = on").unwrap();
+        assert_eq!(show("block_copy_command.audit_log_enabled"), "on");
+    }
+
     // GUC independence: changing one direction does not affect the other
 
     #[pg_test]
@@ -380,6 +515,50 @@ mod tests {
         Spi::run("SET block_copy_command.block_from = off").unwrap();
         assert_eq!(show("block_copy_command.block_to"), "on");
         Spi::run("SET block_copy_command.block_from = on").unwrap();
+    }
+
+    // audit_log table structure
+
+    #[pg_test]
+    fn test_audit_log_table_exists() {
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = 'block_copy_command' AND table_name = 'audit_log'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[pg_test]
+    fn test_audit_log_allowed_copy_is_recorded() {
+        // As the pgrx test superuser, COPY is allowed.  Run a COPY TO STDOUT so
+        // the hook fires, then check that a row with blocked=false was written.
+        Spi::run("CREATE TEMP TABLE _audit_test (id int)").unwrap();
+        Spi::run("INSERT INTO _audit_test VALUES (1)").unwrap();
+
+        let before = Spi::get_one::<i64>("SELECT count(*) FROM block_copy_command.audit_log")
+            .unwrap()
+            .unwrap_or(0);
+
+        // COPY TO STDOUT is allowed for superusers.
+        Spi::run("COPY _audit_test TO STDOUT").unwrap();
+
+        let after = Spi::get_one::<i64>("SELECT count(*) FROM block_copy_command.audit_log")
+            .unwrap()
+            .unwrap_or(0);
+
+        assert!(after > before, "expected a new audit_log row after allowed COPY");
+
+        // Verify the row content.
+        let blocked = Spi::get_one::<bool>(
+            "SELECT blocked FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!blocked, "allowed COPY should have blocked=false");
+
+        Spi::run("DROP TABLE _audit_test").unwrap();
     }
 
     // COPY blocking itself is tested via pg_regress (tests/pg_regress/sql/copy_blocked.sql)

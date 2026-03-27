@@ -208,6 +208,112 @@ else
 fi
 
 echo ""
+echo "=== Audit log ==="
+
+# Helper: run a query and return a single trimmed value.
+q() { psql -t -A -c "$1"; }
+
+echo ""
+echo "--- Test 16: superuser COPY TO creates an audit_log row ---"
+psql -c "TRUNCATE block_copy_command.audit_log;"
+psql -c "COPY (SELECT 1) TO STDOUT;" > /dev/null
+count=$(q "SELECT count(*) FROM block_copy_command.audit_log;")
+if [ "$count" = "1" ]; then
+    pass "superuser COPY TO creates audit_log row"
+else
+    fail "expected 1 audit_log row after superuser COPY TO, got: $count"
+fi
+
+echo ""
+echo "--- Test 17: audit_log row has correct content (COPY TO) ---"
+# Expected: direction=TO, not a program, not blocked, no block_reason.
+row=$(q "SELECT copy_direction || '|' || copy_is_program || '|' || blocked || '|' \
+              || COALESCE(block_reason, 'NULL') \
+         FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
+if [ "$row" = "TO|false|false|NULL" ]; then
+    pass "audit_log row: direction=TO, is_program=false, blocked=false, reason=NULL"
+else
+    fail "unexpected audit_log content: '$row' (expected 'TO|false|false|NULL')"
+fi
+
+echo ""
+echo "--- Test 18: current_user_name is recorded correctly ---"
+user=$(q "SELECT current_user_name FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
+if [ "$user" = "postgres" ]; then
+    pass "audit_log records current_user_name=postgres"
+else
+    fail "expected current_user_name='postgres', got: '$user'"
+fi
+
+echo ""
+echo "--- Test 19: COPY FROM STDIN creates audit_log row with direction=FROM ---"
+psql -c "TRUNCATE block_copy_command.audit_log;"
+psql -c "CREATE TABLE IF NOT EXISTS _audit_from_test (id int);"
+# Feed one data row and the COPY terminator via stdin.
+printf '%s\n%s\n' '42' '\.' | psql -c "COPY _audit_from_test FROM STDIN;" > /dev/null
+psql -c "DROP TABLE _audit_from_test;"
+row=$(q "SELECT copy_direction || '|' || blocked \
+         FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
+if [ "$row" = "FROM|false" ]; then
+    pass "COPY FROM creates audit_log row with direction=FROM, blocked=false"
+else
+    fail "unexpected audit_log content for COPY FROM: '$row' (expected 'FROM|false')"
+fi
+
+echo ""
+echo "--- Test 20: copy_is_program=true recorded for COPY TO PROGRAM ---"
+psql -c "TRUNCATE block_copy_command.audit_log;"
+# block_program must be off so the superuser is not blocked.
+psql -c "SET block_copy_command.block_program = off; \
+         COPY (SELECT 1) TO PROGRAM 'cat > /dev/null';" > /dev/null
+is_prog=$(q "SELECT copy_is_program FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
+if [ "$is_prog" = "t" ]; then
+    pass "audit_log records copy_is_program=true for COPY TO PROGRAM"
+else
+    fail "expected copy_is_program=true, got: '$is_prog'"
+fi
+
+echo ""
+echo "--- Test 21: audit_log_enabled=off suppresses writes ---"
+psql -c "TRUNCATE block_copy_command.audit_log;"
+# SET is connection-scoped; both statements run in the same session via -c.
+psql -c "SET block_copy_command.audit_log_enabled = off; \
+         COPY (SELECT 1) TO STDOUT;" > /dev/null
+count=$(q "SELECT count(*) FROM block_copy_command.audit_log;")
+if [ "$count" = "0" ]; then
+    pass "audit_log_enabled=off suppresses audit writes"
+else
+    fail "expected 0 audit_log rows when logging disabled, got: $count"
+fi
+
+echo ""
+echo "--- Test 22: blocked COPY does not persist in audit_log (tx rollback) ---"
+# When the hook raises ERROR the current transaction aborts, rolling back the
+# SPI-level INSERT.  The server log is the authoritative record for blocked events.
+psql -c "TRUNCATE block_copy_command.audit_log;"
+PGPASSWORD=testpass psql -U testuser -c "COPY (SELECT 1) TO STDOUT;" 2>&1 || true
+count=$(q "SELECT count(*) FROM block_copy_command.audit_log;")
+if [ "$count" = "0" ]; then
+    pass "blocked COPY does not persist in audit_log (transaction rollback)"
+else
+    fail "expected 0 audit_log rows after blocked COPY, got: $count"
+fi
+
+echo ""
+echo "--- Test 23: session_user_name and current_user_name are both recorded ---"
+psql -c "TRUNCATE block_copy_command.audit_log;"
+psql -c "COPY (SELECT 1) TO STDOUT;" > /dev/null
+same=$(q "SELECT (session_user_name = current_user_name) \
+          FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
+su_name=$(q "SELECT session_user_name \
+             FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
+if [ "$same" = "t" ] && [ "$su_name" = "postgres" ]; then
+    pass "audit_log records both session_user_name and current_user_name"
+else
+    fail "unexpected user columns: session_user_name='$su_name', same='$same'"
+fi
+
+echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed"
 echo "================================"

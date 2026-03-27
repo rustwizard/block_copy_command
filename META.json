@@ -2,14 +2,14 @@
    "name": "block_copy_command",
    "abstract": "PostgreSQL extension that blocks COPY commands via a configurable ProcessUtility hook",
    "description": "A PostgreSQL security extension that intercepts and blocks COPY commands using a ProcessUtility hook. Supports direction-specific blocking (COPY TO / COPY FROM), COPY PROGRAM blocking, per-role blocklists, superuser bypass, audit logging, and custom error hints.",
-   "version": "0.1.4",
+   "version": "0.1.5",
    "maintainer": "RustWizard <rustwizard.0@gmail.com>",
    "license": "bsd",
    "provides": {
       "block_copy_command": {
          "abstract": "Block COPY commands via a configurable ProcessUtility hook",
          "file": "block_copy_command.control",
-         "version": "0.1.4"
+         "version": "0.1.5"
       }
    },
    "resources": {

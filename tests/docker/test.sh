@@ -230,10 +230,10 @@ echo "--- Test 17: audit_log row has correct content (COPY TO) ---"
 row=$(q "SELECT copy_direction || '|' || copy_is_program || '|' || blocked || '|' \
               || COALESCE(block_reason, 'NULL') \
          FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
-if [ "$row" = "TO|f|f|NULL" ]; then
+if [ "$row" = "TO|false|false|NULL" ]; then
     pass "audit_log row: direction=TO, is_program=false, blocked=false, reason=NULL"
 else
-    fail "unexpected audit_log content: '$row' (expected 'TO|f|f|NULL')"
+    fail "unexpected audit_log content: '$row' (expected 'TO|false|false|NULL')"
 fi
 
 echo ""
@@ -254,10 +254,10 @@ printf '%s\n%s\n' '42' '\.' | psql -c "COPY _audit_from_test FROM STDIN;" > /dev
 psql -c "DROP TABLE _audit_from_test;"
 row=$(q "SELECT copy_direction || '|' || blocked \
          FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
-if [ "$row" = "FROM|f" ]; then
+if [ "$row" = "FROM|false" ]; then
     pass "COPY FROM creates audit_log row with direction=FROM, blocked=false"
 else
-    fail "unexpected audit_log content for COPY FROM: '$row' (expected 'FROM|f')"
+    fail "unexpected audit_log content for COPY FROM: '$row' (expected 'FROM|false')"
 fi
 
 echo ""
@@ -303,7 +303,7 @@ echo ""
 echo "--- Test 23: session_user_name and current_user_name are both recorded ---"
 psql -c "TRUNCATE block_copy_command.audit_log;"
 psql -c "COPY (SELECT 1) TO STDOUT;" > /dev/null
-same=$(q "SELECT (session_user_name = current_user_name)::text \
+same=$(q "SELECT (session_user_name = current_user_name) \
           FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")
 su_name=$(q "SELECT session_user_name \
              FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1;")

@@ -215,14 +215,75 @@ ALTER ROLE alice SET block_copy_command.blocked_roles = 'alice';
 ALTER ROLE alice RESET block_copy_command.blocked_roles;
 ```
 
-### Audit logging
+### GUC: `block_copy_command.audit_log_enabled`
 
-When a COPY command is blocked, the current username is written to the PostgreSQL server log at `LOG` level:
+Controls whether intercepted `COPY` events are written to `block_copy_command.audit_log`. Only superusers can change this setting.
+
+| Value | Effect |
+|-------|--------|
+| `on` (default) | Every intercepted COPY is recorded in the audit table |
+| `off` | No rows are written (server log is unaffected) |
+
+```sql
+-- Disable audit writes for a specific role:
+ALTER ROLE etl_user SET block_copy_command.audit_log_enabled = off;
+```
+
+### Audit log table
+
+Every intercepted `COPY` command (allowed and blocked) is recorded in `block_copy_command.audit_log`:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `bigserial` | Auto-incrementing primary key |
+| `ts` | `timestamptz` | Wall-clock time of the event (`clock_timestamp()`) |
+| `session_user_name` | `text` | Role that authenticated (stable across `SET ROLE`) |
+| `current_user_name` | `text` | Effective role at the time of COPY |
+| `query_text` | `text` | Full query string |
+| `copy_direction` | `text` | `'TO'` or `'FROM'` |
+| `copy_is_program` | `bool` | `true` for `COPY … PROGRAM` statements |
+| `client_addr` | `inet` | Client IP address (`NULL` for Unix-socket connections) |
+| `application_name` | `text` | `application_name` GUC of the client session |
+| `blocked` | `bool` | `true` if the command was blocked |
+| `block_reason` | `text` | `NULL` when allowed; one of `role_listed`, `program_blocked`, `direction_blocked` when blocked |
+
+> **Note on blocked events:** the audit row is inserted before the `ERROR` is raised, so it is rolled back when the transaction aborts. For blocked commands the server `LOG` line is the authoritative record; audit rows are reliable only for allowed commands.
+
+**Example queries:**
+
+```sql
+-- All COPY events in the last hour
+SELECT ts, current_user_name, copy_direction, blocked, block_reason
+FROM block_copy_command.audit_log
+WHERE ts > now() - interval '1 hour'
+ORDER BY ts DESC;
+
+-- Blocked events only
+SELECT *
+FROM block_copy_command.audit_log
+WHERE blocked
+ORDER BY ts DESC;
+
+-- Activity per user
+SELECT current_user_name, count(*) AS total,
+       count(*) FILTER (WHERE blocked) AS blocked_count
+FROM block_copy_command.audit_log
+GROUP BY current_user_name
+ORDER BY total DESC;
+```
+
+The schema and table are locked down by default; grant `SELECT` to monitoring roles as needed:
+
+```sql
+GRANT USAGE ON SCHEMA block_copy_command TO monitoring_role;
+GRANT SELECT ON block_copy_command.audit_log TO monitoring_role;
+```
+
+When a COPY command is blocked, the event is also written to the PostgreSQL server log at `LOG` level:
 
 ```
-LOG:  current_user = "someuser"
+LOG:  blocked COPY TO program=false user="someuser" reason="direction_blocked"
 ERROR:  COPY TO command is not allowed
-HINT:   Contact DBA to request access
 ```
 
 ## Testing
@@ -244,6 +305,10 @@ This builds the extension inside Docker, starts a PostgreSQL 17 instance with th
 - GUC `block_copy_command.enabled` toggle
 - GUC `block_copy_command.blocked_roles` blocks specific roles including superusers
 - DDL, DML, and regular queries unaffected
+- Audit log: allowed COPY creates a row; correct `copy_direction`, `copy_is_program`, `blocked`, `block_reason` values
+- Audit log: `session_user_name` and `current_user_name` both recorded
+- `audit_log_enabled=off` suppresses writes
+- Blocked COPY does not persist in audit log (transaction rollback)
 
 ### With pgrx test runner
 

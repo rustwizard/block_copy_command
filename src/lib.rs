@@ -518,6 +518,9 @@ mod tests {
     }
 
     // audit_log table structure
+    // Full audit log behaviour (writes on COPY, blocked-tx rollback, etc.) is
+    // tested in tests/docker/test.sh because SPI rejects COPY before
+    // ProcessUtility is ever called, making hook-level writes untestable here.
 
     #[pg_test]
     fn test_audit_log_table_exists() {
@@ -531,37 +534,61 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_audit_log_allowed_copy_is_recorded() {
-        // As the pgrx test superuser, COPY is allowed.  Run a COPY TO STDOUT so
-        // the hook fires, then check that a row with blocked=false was written.
-        Spi::run("CREATE TEMP TABLE _audit_test (id int)").unwrap();
-        Spi::run("INSERT INTO _audit_test VALUES (1)").unwrap();
-
-        let before = Spi::get_one::<i64>("SELECT count(*) FROM block_copy_command.audit_log")
+    fn test_audit_log_expected_columns_exist() {
+        // Verify every column name is present; data-type mismatches would cause
+        // the SPI INSERT in write_audit_log to fail at runtime.
+        let expected = [
+            "id",
+            "ts",
+            "session_user_name",
+            "current_user_name",
+            "query_text",
+            "copy_direction",
+            "copy_is_program",
+            "client_addr",
+            "application_name",
+            "blocked",
+            "block_reason",
+        ];
+        for col in expected {
+            let found = Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM information_schema.columns \
+                 WHERE table_schema = 'block_copy_command' \
+                   AND table_name   = 'audit_log' \
+                   AND column_name  = '{col}'"
+            ))
             .unwrap()
-            .unwrap_or(0);
+            .unwrap();
+            assert_eq!(found, 1, "column '{col}' missing from audit_log");
+        }
+    }
 
-        // COPY TO STDOUT is allowed for superusers.
-        Spi::run("COPY _audit_test TO STDOUT").unwrap();
-
-        let after = Spi::get_one::<i64>("SELECT count(*) FROM block_copy_command.audit_log")
-            .unwrap()
-            .unwrap_or(0);
-
-        assert!(after > before, "expected a new audit_log row after allowed COPY");
-
-        // Verify the row content.
-        let blocked = Spi::get_one::<bool>(
-            "SELECT blocked FROM block_copy_command.audit_log ORDER BY id DESC LIMIT 1",
+    #[pg_test]
+    fn test_audit_log_is_writable() {
+        // Direct INSERT must succeed so we know the schema is correct and the
+        // table is accessible to the extension's superuser context.
+        Spi::run(
+            "INSERT INTO block_copy_command.audit_log \
+             (session_user_name, current_user_name, query_text, \
+              copy_direction, copy_is_program, blocked) \
+             VALUES ('u', 'u', 'COPY t TO STDOUT', 'TO', false, false)",
+        )
+        .unwrap();
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM block_copy_command.audit_log \
+             WHERE query_text = 'COPY t TO STDOUT'",
         )
         .unwrap()
         .unwrap();
-        assert!(!blocked, "allowed COPY should have blocked=false");
-
-        Spi::run("DROP TABLE _audit_test").unwrap();
+        assert_eq!(count, 1);
+        Spi::run(
+            "DELETE FROM block_copy_command.audit_log \
+             WHERE query_text = 'COPY t TO STDOUT'",
+        )
+        .unwrap();
     }
 
-    // COPY blocking itself is tested via pg_regress (tests/pg_regress/sql/copy_blocked.sql)
-    // because SPI explicitly rejects COPY before ProcessUtility is ever called,
-    // making it untestable through Spi::run.
+    // COPY blocking itself is tested via tests/docker/test.sh because SPI
+    // rejects COPY before ProcessUtility is ever called, making hook-level
+    // behaviour untestable through Spi::run.
 }

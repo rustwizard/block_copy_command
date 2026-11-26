@@ -23,15 +23,15 @@ All other SQL commands (DDL, DML, queries) are unaffected and pass through to th
 
 ## Requirements
 
-- PostgreSQL 13–18
-- Built with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17.0
+- PostgreSQL 15–19
+- Built with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.20.1
 
 ## Installation
 
 ### Build from source
 
 ```bash
-cargo install cargo-pgrx --version 0.17.0 --locked
+cargo install cargo-pgrx --version 0.20.1 --locked
 cargo pgrx init --pg17 download   # or point to your system pg_config
 cargo pgrx package --features pg17
 ```

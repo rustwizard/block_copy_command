@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN cargo install cargo-pgrx --version 0.17.0 --locked
+RUN cargo install cargo-pgrx --version 0.20.1 --locked
 
 WORKDIR /build
 COPY . .

@@ -1,7 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
-use pgrx::is_a;
+use pgrx::pg_sys::PgNode;
 use pgrx::pg_sys;
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys::panic::ErrorReport;
@@ -30,7 +30,6 @@ static mut PREV_PROCESS_UTILITY_HOOK: pg_sys::ProcessUtility_hook_type = None;
 struct ProcessUtilityArgs {
     pstmt: *mut pg_sys::PlannedStmt,
     query_string: *const std::os::raw::c_char,
-    #[cfg(not(feature = "pg13"))]
     read_only_tree: bool,
     context: pg_sys::ProcessUtilityContext::Type,
     params: pg_sys::ParamListInfo,
@@ -41,7 +40,7 @@ struct ProcessUtilityArgs {
 
 unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
     let node = (*args.pstmt).utilityStmt;
-    if !node.is_null() && is_a(node, pg_sys::NodeTag::T_CopyStmt) {
+    if !node.is_null() && pg_sys::Node::is_a_ptr(node, pg_sys::NodeTag::T_CopyStmt) {
         let copy_stmt = node as *mut pg_sys::CopyStmt;
         let is_from = (*copy_stmt).is_from;
         let is_program = (*copy_stmt).is_program;
@@ -121,29 +120,6 @@ unsafe fn block_copy_process_utility(args: ProcessUtilityArgs) {
         }
     }
 
-    #[cfg(feature = "pg13")]
-    match PREV_PROCESS_UTILITY_HOOK {
-        Some(prev) => prev(
-            args.pstmt,
-            args.query_string,
-            args.context,
-            args.params,
-            args.query_env,
-            args.dest,
-            args.qc,
-        ),
-        None => pg_sys::standard_ProcessUtility(
-            args.pstmt,
-            args.query_string,
-            args.context,
-            args.params,
-            args.query_env,
-            args.dest,
-            args.qc,
-        ),
-    }
-
-    #[cfg(not(feature = "pg13"))]
     match PREV_PROCESS_UTILITY_HOOK {
         Some(prev) => prev(
             args.pstmt,
@@ -220,31 +196,6 @@ fn write_audit_log(
 }
 
 #[pg_guard]
-#[cfg(feature = "pg13")]
-unsafe extern "C-unwind" fn hook_trampoline(
-    pstmt: *mut pg_sys::PlannedStmt,
-    query_string: *const std::os::raw::c_char,
-    context: pg_sys::ProcessUtilityContext::Type,
-    params: pg_sys::ParamListInfo,
-    query_env: *mut pg_sys::QueryEnvironment,
-    dest: *mut pg_sys::DestReceiver,
-    qc: *mut pg_sys::QueryCompletion,
-) {
-    unsafe {
-        block_copy_process_utility(ProcessUtilityArgs {
-            pstmt,
-            query_string,
-            context,
-            params,
-            query_env,
-            dest,
-            qc,
-        });
-    }
-}
-
-#[pg_guard]
-#[cfg(not(feature = "pg13"))]
 unsafe extern "C-unwind" fn hook_trampoline(
     pstmt: *mut pg_sys::PlannedStmt,
     query_string: *const std::os::raw::c_char,
